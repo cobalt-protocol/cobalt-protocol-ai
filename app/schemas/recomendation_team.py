@@ -45,3 +45,9 @@ class TeamRecommendationResponse(BaseModel):
     data: List[TeamItem]
     message: str
     errors: Optional[Any] = None
+
+
+class TeamRecommendationByIdResponse(BaseModel):
+    data: Optional[TeamItem] = None
+    message: str
+    errors: Optional[Any] = None

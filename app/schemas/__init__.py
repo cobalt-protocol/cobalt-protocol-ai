@@ -1,3 +1,3 @@
-from .recomendation_team import TeamRecommendationResponse, TeamItem
+from .recomendation_team import TeamRecommendationResponse, TeamItem, TeamRecommendationByIdResponse
 
-__all__ = ["TeamRecommendationResponse", "TeamItem"]
+__all__ = ["TeamRecommendationResponse", "TeamItem", "TeamRecommendationByIdResponse"]
