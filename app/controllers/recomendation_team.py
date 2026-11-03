@@ -1,4 +1,4 @@
-from app.utils.ai_models import tanya_rag
+from app.utils.ai import RecomendationTeam
 import psycopg
 from psycopg.rows import dict_row
 from app.configs import settings
@@ -17,7 +17,7 @@ class RecomendationTeamControllers:
             f"yang membutuhkan skill : {skill}, dengan background : {current_user['data']['user']['skill_description']}"
         )
         user_id = current_user["data"]["user"]["id"]
-        hasil = tanya_rag(pertanyaan)
+        hasil = await RecomendationTeam.recomendation_team(pertanyaan)
         hasil = ast.literal_eval(hasil)
         if not hasil:
             return JSONResponse(
