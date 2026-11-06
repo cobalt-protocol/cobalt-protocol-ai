@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     api_key_chutes: str = ""
 
+    redis_url: str = ""
+
     competition_contract: str | None = None
 
     chain_id: int = 968

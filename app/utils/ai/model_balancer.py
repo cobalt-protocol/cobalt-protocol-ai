@@ -6,7 +6,7 @@ class ModelBalancer:
     @staticmethod
     async def get_available_models() -> list[dict]:
         response = requests.get(
-            f"{settings.base_url_chutes}/models",
+            f"https://llm.chutes.ai/v1/models",
             headers={
                 "Authorization": f"Bearer {settings.api_key_chutes}",
                 "Content-Type": "application/json",
@@ -58,7 +58,7 @@ class ModelBalancer:
 
         try:
             response = requests.post(
-                f"{settings.base_url_chutes}/chat/completions",
+                f"{settings.base_url_chutes}chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.api_key_chutes}",
                     "Content-Type": "application/json",

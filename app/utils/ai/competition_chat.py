@@ -1,186 +1,51 @@
 import requests
-import io
-from openai import OpenAI
-import base64
-import pymupdf
-from app.configs import settings
-from pathlib import Path
-from app.utils.ai import ModelBalancer
-import re
-import ast
-import json
 import psycopg
-from app.utils.langchain_embed import embeddings
+from app.configs import settings
+from app.utils.ai import ModelBalancer
+from typing import Optional, Union
+from datetime import datetime
+import ulid
+from redisvl.query.filter import Tag
 
 
 class CompetitionChat:
-    FORMAT_GAMBAR = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-    }
+    @staticmethod
+    async def generate_ulid(
+        timestamp: Optional[
+            Union[int, float, str, bytes, bytearray, memoryview, datetime]
+        ] = None,
+    ) -> str:
+        if timestamp is None:
+            return str(ulid.ULID())
 
-    client = OpenAI(
-        api_key=settings.api_key_chutes,
-        base_url=settings.base_url_chutes,
-    )
+        return str(ulid.from_timestamp(timestamp))
 
     @staticmethod
-    async def bersihkan_output(teks):
-        teks = "\n".join(baris.strip() for baris in teks.splitlines())
+    async def query_document_rag(question: str, top_k: int = 3):
+        from app.utils.langchain_embed import embeddings
 
-        teks = re.sub(r"\n{3,}", "\n\n", teks)
+        question_embedding = embeddings.embed_query(question)
 
-        return teks.strip()
+        query = """
+            SELECT content
+            FROM competition_guidebook_embedding
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s;
+        """
 
-    @staticmethod
-    async def analisis_dokumen(path, pertanyaan, max_pages=None):
-        if isinstance(path, io.BytesIO):
+        with psycopg.connect(settings.database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (question_embedding, top_k))
+                rows = cursor.fetchall()
 
-            dokumen = pymupdf.open(stream=path.getvalue(), filetype="pdf")
+        context = "\n\n".join(row[0] for row in rows)
 
-        elif isinstance(path, (bytes, bytearray)):
-
-            dokumen = pymupdf.open(stream=path, filetype="pdf")
-
-        else:
-
-            path = Path(path)
-            ekstensi = path.suffix.lower()
-
-            if not path.exists():
-                raise FileNotFoundError(f"File tidak ditemukan: {path}")
-
-            if ekstensi != ".pdf" and ekstensi not in CompetitionChat.FORMAT_GAMBAR:
-                raise ValueError("Format harus PDF, PNG, JPG, JPEG, atau WEBP.")
-
-            dokumen = pymupdf.open(str(path))
-
-        try:
-
-            # 2. Batasi jumlah halaman
-            jumlah_halaman = len(dokumen)
-
-            if max_pages is not None:
-                jumlah_halaman = min(jumlah_halaman, max_pages)
-
-            konteks_teks = []
-            konten_visual = []
-
-            # 3. Extract teks dan render gambar
-            for i in range(jumlah_halaman):
-
-                halaman = dokumen[i]
-
-                # Extract text
-                teks = halaman.get_text("text").strip()
-
-                if teks:
-                    konteks_teks.append(f"Halaman {i + 1}:\n{teks}")
-
-                # Render halaman menjadi gambar
-                pix = halaman.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
-
-                gambar = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-
-                konten_visual.append(
-                    {"type": "text", "text": f"Visual halaman {i + 1}:"}
-                )
-
-                konten_visual.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{gambar}"},
-                    }
-                )
-
-            teks_pdf = "\n\n".join(konteks_teks)
-
-            if not teks_pdf:
-                teks_pdf = (
-                    "Tidak ada teks yang berhasil diekstrak. "
-                    "Gunakan gambar untuk membaca dokumen."
-                )
-
-        finally:
-            dokumen.close()
-
-        # 5. Gabungkan pertanyaan, teks, dan gambar
-        konten_user = [
-            {
-                "type": "text",
-                "text": (
-                    "Kamu bertugas memahami dan menjawab pertanyaan "
-                    "berdasarkan dokumen yang diberikan.\n\n"
-                    f"PERTANYAAN:\n{pertanyaan}\n\n"
-                    f"ISI DOKUMEN:\n{teks_pdf}\n\n"
-                    "ATURAN PENILAIAN:\n"
-                    "1. relevan = y jika topik atau maksud pertanyaan "
-                    "berhubungan dengan isi, tujuan, objek, atau pembahasan dokumen.\n"
-                    "2. relevan = n jika pertanyaan sama sekali tidak "
-                    "berhubungan dengan dokumen.\n"
-                    "3. status = not_found jika pertanyaan relevan "
-                    "tetapi informasi yang diminta tidak ditemukan.\n\n"
-                    "ATURAN MENJAWAB:\n"
-                    "- Jika relevan = y, jawab pertanyaan berdasarkan dokumen.\n"
-                    "- Jika relevan = n, jawab bahwa pertanyaan tidak relevan "
-                    "dengan dokumen, kemudian berikan ringkasan singkat dokumen.\n"
-                    "- Jika status = not_found, jelaskan bahwa informasi "
-                    "tidak ditemukan dalam dokumen.\n"
-                    "- Jangan mengarang informasi.\n"
-                    "- Gunakan teks dan visual sebagai sumber informasi.\n\n"
-                    "FORMAT OUTPUT WAJIB JSON:\n"
-                    "{\n"
-                    '  "relevan": "y atau n",\n'
-                    '  "status": "answered atau not_found atau irrelevant",\n'
-                    '  "jawaban": "jawaban atau penjelasan"\n'
-                    "}\n\n"
-                    "Jangan gunakan Markdown code block. "
-                    "Jangan memberikan teks di luar JSON."
-                ),
-            }
-        ]
-
-        konten_user.extend(konten_visual)
-
-        model_id = await ModelBalancer.find_first_healthy_model()
-
-        response = CompetitionChat.client.chat.completions.create(
-            model=model_id,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Kamu adalah document understanding assistant. "
-                        "Tugasmu mengidentifikasi hubungan pertanyaan dengan "
-                        "dokumen, kemudian menjawab berdasarkan bukti tekstual "
-                        "dan visual. Jangan menyimpulkan bahwa pertanyaan tidak "
-                        "relevan hanya karena jawaban spesifiknya tidak ditemukan. "
-                        "Selalu keluarkan JSON valid."
-                    ),
-                },
-                {"role": "user", "content": konten_user},
-            ],
-            response_format={"type": "json_object"},
-            max_tokens=1500,
-        )
-
-        return await CompetitionChat.bersihkan_output(
-            response.choices[0].message.content or ""
-        )
-
-    @staticmethod
-    async def download_pdf(url):
-        response = requests.get(url, timeout=60)
-        response.raise_for_status()
-
-        pdf_memory = io.BytesIO(response.content)
-
-        return pdf_memory
+        return context
 
     @staticmethod
     async def query_rag_question(question: str, top_k: int = 3):
+        from app.utils.langchain_embed import embeddings
+
         question_embedding = embeddings.embed_query(question)
 
         query = """
@@ -202,41 +67,65 @@ class CompetitionChat:
                 rows = cursor.fetchall()
 
         context = "\n\n".join(f"""Competition ID: {row[0]}
-    Chunk Type: {row[1]}
-    Content: {row[2]}
-    Similarity: {row[3]:.4f}
-    """ for row in rows)
+Chunk Type: {row[1]}
+Content: {row[2]}
+Similarity: {row[3]:.4f}""" for row in rows)
 
         return context
 
     @staticmethod
-    async def tanya_competition(question: str, competition_id: str):
+    async def tanya_competition(question: str, competition_id: str, user_id):
+        from app.configs.redis_config import vector_store
+
         prompt_template = """
 Jawab pertanyaan berdasarkan konteks berikut.
 
 Aturan:
-- Untuk Konteks kompetisi/perlombaan/hackathonnya id nya adalah {competition_id}
-- Jika pertanyaan tidak sesuai konteks. outputnya saya tidak tahu
+- Untuk Konteks kompetisi/perlombaan/hackathonnya id nya adalah {competition_id}.
+- Untuk jawaban terkait pertanyaan cek berdasarkan konteks perlombaan di bawah.
+- Untuk konteks cek dahulu berdasarkan Konteks Memory, jika tidak yakin baru berdasarkan Konteks Perlombaan
+- Jika tidak yakin dengan Konteks Perlombaan baru cek berdasarkan Konteks Guidebook
+- Jika pertanyaan tidak sesuai konteks. outputnya saya tidak tahu.
 - Tolong jawab pertanyaan sesuai kompetisi id : {competition_id}
 - Jika user mention kompetisi id, dan tidak sama dengan {competition_id}. outputnya saya tidak tahu
 - Pada output jangan menyebutkan kompetisi id
+- Untuk output kirim dalam format markdown
+- Untuk jawaban harus sesuai bahasa pertanyaa, misal pertanyaan pakai bahasa indonesia, berarti jawaban pakai bahasa indonesia.
 
-Konteks:
+Konteks Memory:
+{context_memory}
+
+Konteks Perlombaan:
 {context}
+
+Konteks Guidebook:
+{guidebook}
 
 Pertanyaan:
 {question}
 """
 
+        filter_expr = Tag("user_id") == user_id
+
+        docs = vector_store.similarity_search(question, k=2, filter=filter_expr)
+        context_memory = "\n\n".join(
+            f"[Dokumen {i+1}] {doc.page_content}" for i, doc in enumerate(docs)
+        )
         context = await CompetitionChat.query_rag_question(question)
+        guidebook = await CompetitionChat.query_document_rag(question)
 
         prompt = (
             prompt_template.replace("{context}", context)
             .replace("{question}", question)
             .replace("{competition_id}", competition_id)
+            .replace("{guidebook}", guidebook)
+            .replace("{context_memory}", context_memory)
         )
 
-        model_id = await ModelBalancer.find_first_healthy_model()
+        try:
+            model_id = await ModelBalancer.find_first_healthy_model()
+        except:
+            print("error")
 
         data = {
             "model": model_id,
@@ -265,24 +154,53 @@ Pertanyaan:
 
         result = response.json()
 
-        return result["choices"][0]["message"]["content"]
+        answer = result["choices"][0]["message"]["content"]
 
-    @staticmethod
-    async def result_chat(question, competition_id, guidebook_url):
-        pdf_memory = await CompetitionChat.download_pdf(guidebook_url)
-        result = await CompetitionChat.analisis_dokumen(
-            path=pdf_memory, pertanyaan=question
-        )
-        try:
-            json_jawaban = ast.literal_eval(result)
-        except SyntaxError:
-            json_jawaban = json.loads(result)
-        if (
-            json_jawaban["status"] == "not_found"
-            or json_jawaban["status"] == "inrelevant"
-            or json_jawaban["relevan"] == "n"
-        ):
-            result = await CompetitionChat.tanya_competition(question, competition_id)
-        else:
-            result = json_jawaban["jawaban"]
-        return result
+        texts = [f"""Pertanyaan:
+{question}
+
+Jawaban:
+{answer}"""]
+        metadatas = [
+            {
+                "source": f"doc_{await CompetitionChat.generate_ulid()}",
+                "user_id": user_id,
+            }
+        ]
+
+        ids_ = vector_store.add_texts(texts, metadatas=metadatas)
+
+        query = """
+                INSERT INTO history_chat (
+                    id, 
+                    id_redis, 
+                    question, 
+                    answer, 
+                    user_id, 
+                    created_at, 
+                    updated_at
+                ) VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    NOW(),
+                    NOW()
+                );
+                """
+
+        with psycopg.connect(settings.database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        await CompetitionChat.generate_ulid(),
+                        ids_[0],
+                        question,
+                        answer,
+                        user_id,
+                    ),
+                )
+
+        return answer

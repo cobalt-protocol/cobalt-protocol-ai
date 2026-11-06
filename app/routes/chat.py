@@ -16,4 +16,4 @@ async def chat(
     request: ChatRequest,
     current_user: str = Depends(verify_auth_token),
 ):
-    return await ChatControllers.chat(competition_id, request.question)
+    return await ChatControllers.chat(current_user, competition_id, request.question)
